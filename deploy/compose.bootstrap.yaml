@@ -1,0 +1,13 @@
+# PRIVATE first-account enrollment only. Caddy serves a maintenance response.
+# Remove this override and recreate the service before public deployment.
+services:
+  tgtop:
+    environment:
+      TGTOP_MODE: development
+      TGTOP_ORIGIN: http://127.0.0.1:18766
+      TGTOP_ALLOW_SIGNUP: "1"
+    ports:
+      - "127.0.0.1:18766:8765"
+  caddy:
+    volumes:
+      - ./Caddyfile.bootstrap:/etc/caddy/Caddyfile:ro

@@ -1,0 +1,56 @@
+let calendarMonth=null, resumeDocument=null, resumeDirty=false;
+function calendarHtml(){
+  calendarMonth ||= today().slice(0,7);
+  const [year,month]=calendarMonth.split('-').map(Number), start=new Date(Date.UTC(year,month-1,1));
+  const first=new Date(start);first.setUTCDate(1-start.getUTCDay());
+  const tasks=selectedTasks(), label=start.toLocaleDateString(undefined,{month:'long',year:'numeric',timeZone:'UTC'});
+  let cells='';
+  for(let i=0;i<42;i++){
+    const d=new Date(first);d.setUTCDate(first.getUTCDate()+i);const key=d.toISOString().slice(0,10);
+    cells+=`<div class="calendar-day ${key.slice(0,7)!==calendarMonth?'outside':''} ${key===today()?'current':''}"><button class="day-number" data-day="${key}" aria-label="Add a task on ${key}">${d.getUTCDate()} <span>＋</span></button>${tasks.filter(t=>taskDay(t)===key).sort((a,b)=>a.due_at.localeCompare(b.due_at)).map(t=>`<button class="calendar-task ${t.status==='done'?'completed':''} ${esc(t.priority||'normal')}" data-task="${t.id}" title="${esc(pname(t.project_id))}"><span>${esc(new Date(t.due_at).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit',timeZone:state.settings.timezone||'America/New_York'}))}</span>${esc(t.title)}</button>`).join('')}</div>`;
+  }
+  return heading('TASK CALENDAR','Your tasks, on the calendar.',`Click a day to add a task. Times shown in ${esc(state.settings.timezone||'America/New_York')}.`,'<button class="primary" id="addTask">＋ New task</button>')+`<section class="panel"><div class="section-head"><h2>${esc(label)}</h2><div class="actions"><button id="calendarPrevious" aria-label="Previous month">←</button><button id="calendarToday">Today</button><button id="calendarNext" aria-label="Next month">→</button></div></div><div class="calendar-scroll"><div class="calendar-weekdays">${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>`<div>${d}</div>`).join('')}</div><div class="calendar-grid">${cells}</div></div></section><section class="panel"><h2>Without a date</h2>${taskRows(tasks.filter(t=>!t.due_at))}</section><section class="panel"><h2>Needs attention</h2>${taskRows(tasks.filter(overdue))}</section>`;
+}
+function moveCalendar(delta){const [y,m]=calendarMonth.split('-').map(Number);calendarMonth=new Date(Date.UTC(y,m-1+delta,1)).toISOString().slice(0,7);renderPage()}
+function bindPersonal(){
+  on('resumeUpload',()=>modal('Upload resume to your account','<p>Choose your Word document. TgTop encrypts the account copy and makes it available on your devices. Edits update this copy. Download it to update a file on your computer. Resume content stays outside AI access and search.</p><label>Resume file</label><input id="resumeUploadFile" type="file" accept=".docx" required>',async()=>{const f=new FormData();f.append('file',$('#resumeUploadFile').files[0]);await api('/resume/upload','POST',f);renderPage()},'Upload resume'));
+  on('resumeDownload',async()=>{try{download(await api('/resume/download'),resumeDocument.filename)}catch(e){toast(e.message)}});
+  on('calendarPrevious',()=>moveCalendar(-1));on('calendarNext',()=>moveCalendar(1));on('calendarToday',()=>{calendarMonth=today().slice(0,7);renderPage()});
+  bind('[data-day]',e=>{taskModal();$('#due').value=e.dataset.day+'T18:00'});
+  on('resumeLink',()=>modal('Link your resume',`<p>Choose the original Word file on this service computer. Saving edits updates that file. TgTop will access only this approved file; AI access is disabled.</p><label>Full .docx file path</label><input id="resumePath" required placeholder="C:\\Users\\…\\Desktop\\Resume.docx">`,async()=>{await api('/resume/link','POST',{path:$('#resumePath').value,confirm:true});renderPage()},'Approve and link'));
+  on('resumeReload',()=>{if(resumeDirty)modal('Discard unsaved resume edits?', '<p>Reload the file from your computer and discard the edits shown here.</p>',async()=>{resumeDirty=false;await loadResume()},'Discard and reload');else loadResume()});
+  on('resumeSave',saveResume);
+  on('resumeRestore',()=>modal('Restore the previous resume?', '<p>This replaces the linked file with the encrypted recovery copy from its last save.</p>',async()=>{await api('/resume/restore','POST',{confirm:true,revision:resumeDocument.revision});resumeDirty=false;await loadResume()},'Restore previous version'));
+  on('messagingSetup',messagingModal);
+  if($('#messagingStatus'))api('/messaging').then(cfg=>{if(!$('#messagingStatus'))return;$('#messagingStatus').textContent=`${cfg.provider.startsWith('photon')?'Photon':'Twilio'} · ${cfg.configured?(cfg.checked?'Credentials checked':'Settings saved; check connection'):'Not connected'} · ${cfg.phone_verified?'Phone verified':'Phone verification needed'}`}).catch(e=>{if($('#messagingStatus'))$('#messagingStatus').textContent=e.message});
+}
+async function loadResume(){
+  const host=$('#resumeEditor');if(!host)return;
+  host.innerHTML='<p class="muted">Opening the linked Word file…</p>';
+  try{
+    const doc=await api('/resume');if(!$('#resumeEditor'))return;resumeDocument=doc;resumeDirty=false;
+    $('#resumeSave').textContent=doc.managed?'Save to account':'Save to computer';
+    host.innerHTML=`<div class="resume-file"><strong>${esc(doc.filename)}</strong><small>${esc(doc.path)}</small><span id="resumeSaveStatus" role="status">Saved on your computer</span></div><div class="resume-paper">${doc.paragraphs.map(p=>`<div class="resume-paragraph" role="textbox" aria-label="Resume paragraph ${p.id+1}" contenteditable="plaintext-only" data-paragraph="${p.id}">${p.runs.map(r=>`<span style="${r.bold?'font-weight:700;':''}${r.italic?'font-style:italic;':''}">${esc(r.text)}</span>`).join('')||'<br>'}</div>`).join('')}</div>`;
+    host.querySelectorAll('[data-paragraph]').forEach(el=>{el.oninput=()=>{resumeDirty=true;$('#resumeSaveStatus').textContent='Unsaved changes. Choose Save to update the Word file'};el.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();toast('Edit within each paragraph. Open Word to add sections or change page layout.')}}});
+    $('#resumeSaveStatus').textContent=doc.managed?'Saved to your account':'Saved on your computer';
+    $('#resumeUpload').disabled=true;$('#resumeDownload').disabled=false;
+    $('#resumeSave').disabled=false;$('#resumeRestore').disabled=!doc.recovery_available;
+  }catch(e){host.innerHTML=`<div class="empty">${esc(e.message)}<p>Upload your Word resume to your account, or link a file on the service computer.</p></div>`;$('#resumeSave').disabled=true;$('#resumeRestore').disabled=true}
+}
+async function saveResume(){
+  if(!resumeDocument||!resumeDirty){toast('No unsaved resume edits');return}
+  const paragraphs=[...document.querySelectorAll('[data-paragraph]')].map(el=>({id:Number(el.dataset.paragraph),text:el.innerText.replaceAll('\n','')}));
+  try{await api('/resume','POST',{revision:resumeDocument.revision,paragraphs});resumeDirty=false;await loadResume();toast(resumeDocument.managed?'Resume saved to your account':'Resume saved to your original Word file')}catch(e){$('#resumeSaveStatus').textContent=e.message;toast(e.message)}
+}
+async function messagingModal(){
+  const cfg=await api('/messaging');if(!cfg.configured)cfg.provider='photon_spectrum';
+  modal('Connect messaging service',`<p>Use Photon Spectrum project credentials from your dashboard. Your phone must be a registered project user. Messages use the managed Photon line and available iMessage, RCS or SMS transport; carrier SMS delivery requires a live test.</p><label>Provider</label><select id="messageProvider"><option value="photon_spectrum" ${cfg.provider==='photon_spectrum'?'selected':''}>Photon Spectrum</option><option value="photon" ${cfg.provider==='photon'?'selected':''}>Photon Advanced (legacy)</option><option value="twilio" ${cfg.provider==='twilio'?'selected':''}>Twilio</option></select><div id="spectrumFields"><label>Photon project ID</label><input id="spectrumId" value="${esc(cfg.project_id||'')}"><label>Photon project secret</label><input id="spectrumSecret" type="password" autocomplete="off" placeholder="Leave blank to keep saved secret"><p>Incoming commands use an authenticated stream. No public webhook is needed for this connection.</p></div><div id="photonFields"><label>Photon HTTPS server URL</label><input id="photonUrl" type="url" value="${esc(cfg.server_url||'')}"><label>Photon API key</label><input id="photonKey" type="password" autocomplete="off" placeholder="Leave blank to keep saved key"><label>Photon webhook signing secret</label><input id="photonSigning" type="password" autocomplete="off" placeholder="From the Photon webhook bridge"></div><div id="twilioFields"><label>Twilio account SID</label><input id="twilioSid" autocomplete="off"><label>Twilio auth token</label><input id="twilioToken" type="password" autocomplete="off" placeholder="Leave blank to keep saved token"><label>SMS sending number</label><input id="twilioFrom" type="tel" value="${esc(cfg.from||'')}"><label>Twilio Verify service SID</label><input id="twilioVerify" autocomplete="off"></div><div id="messageWebhookFields"><label>Public HTTPS incoming webhook URL</label><input id="messageWebhook" type="url" value="${esc(cfg.webhook_url||'')}" placeholder="https://your-service/api/sms/photon/incoming"></div><p><small>Keys are encrypted in this service’s private settings. The scheduler can use them while your vault is locked. They are never given to the AI. An always-on hosted service is required for reminders while your PC is off.</small></p>`,async()=>{const provider=$('#messageProvider').value;await api('/messaging','POST',{provider,project_id:$('#spectrumId').value,project_secret:$('#spectrumSecret').value,server_url:$('#photonUrl').value,api_key:$('#photonKey').value,signing_secret:$('#photonSigning').value,webhook_url:$('#messageWebhook').value,account_sid:$('#twilioSid').value,auth_token:$('#twilioToken').value,from:$('#twilioFrom').value,verify_sid:$('#twilioVerify').value});const result=await api('/messaging/check','POST',{});toast(result.message);await refresh()},'Save and check connection');
+  const toggle=()=>{$('#spectrumFields').hidden=$('#messageProvider').value!=='photon_spectrum';$('#messageWebhookFields').hidden=$('#messageProvider').value==='photon_spectrum';$('#photonFields').hidden=$('#messageProvider').value!=='photon';$('#twilioFields').hidden=$('#messageProvider').value!=='twilio'};$('#messageProvider').onchange=toggle;toggle();
+}
+window.addEventListener('beforeunload',e=>{if(resumeDirty){e.preventDefault();e.returnValue=''}});
+document.addEventListener('click',e=>{
+  const button=e.target.closest('[data-view],#signout');
+  if(!button||!resumeDirty)return;
+  e.preventDefault();e.stopImmediatePropagation();
+  modal('Leave unsaved resume edits?', '<p>Your edits have not been saved to the Word file. Save before leaving, or discard these edits.</p>',async()=>{resumeDirty=false;button.click()},'Discard and leave');
+},true);

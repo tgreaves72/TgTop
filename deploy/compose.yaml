@@ -1,0 +1,35 @@
+services:
+  tgtop:
+    build: ..
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      TGTOP_HOST: 0.0.0.0
+      TGTOP_PORT: 8765
+      TGTOP_DATA: /data
+      TGTOP_ORIGIN: https://${TGTOP_DOMAIN:?Set TGTOP_DOMAIN in .env}
+      TGTOP_MODE: live
+    volumes:
+      - tgtop-data:/data
+    expose: ["8765"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/status', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    security_opt: ["no-new-privileges:true"]
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      TGTOP_DOMAIN: ${TGTOP_DOMAIN:?Set TGTOP_DOMAIN in .env}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+volumes:
+  tgtop-data:
+  caddy-data:
+  caddy-config:

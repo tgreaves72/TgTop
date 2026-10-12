@@ -1,0 +1,30 @@
+# Apply after compose.yaml. Run from deploy with the root .env explicitly loaded.
+services:
+  tgtop:
+    image: tgtop:small
+    mem_limit: 600m
+    memswap_limit: 1600m
+    pids_limit: 128
+    environment:
+      TGTOP_CONCURRENCY: "8"
+      TGTOP_UPLOAD_MB: "10"
+      TGTOP_BACKUP_MB: "32"
+      TGTOP_RESTORE_EXPANDED_MB: "96"
+      NODE_OPTIONS: "--max-old-space-size=96"
+      MALLOC_ARENA_MAX: "2"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+  caddy:
+    mem_limit: 100m
+    memswap_limit: 200m
+    pids_limit: 64
+    environment:
+      GOMEMLIMIT: "75MiB"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

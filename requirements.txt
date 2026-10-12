@@ -1,0 +1,17 @@
+fastapi==0.143.0
+uvicorn>=0.35,<1
+cryptography==50.0.2
+argon2-cffi>=25,<26
+python-multipart>=0.0.20,<1
+twilio>=9,<10
+openai==3.29.0
+mcp==2.3.0
+httpx>=0.28,<1
+tzdata>=2025.2
+pytest>=8,<10
+pyinstaller>=6,<7
+pywin32>=312; sys_platform == 'win32'
+
+lxml>=6,<7
+
+PyJWT[crypto]>=2.10,<3

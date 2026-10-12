@@ -1,0 +1,4 @@
+{$TGTOP_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy tgtop:8765
+}

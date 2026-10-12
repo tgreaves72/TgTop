@@ -1,0 +1,3 @@
+{$TGTOP_DOMAIN} {
+    respond "TgTop setup in progress. Public sign-in is not enabled." 503
+}
