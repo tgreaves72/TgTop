@@ -4,6 +4,15 @@ import pytest
 from test_workflows import env, project
 from app import school
 
+def test_partial_saved_settings_apply_defaults(env, monkeypatch):
+    s,c,_=env
+    s.store.set_config('settings', {'phone_verified':True, 'channels':['sms']})
+    assert s.settings()['timezone']=='America/New_York'
+    assert s.settings()['phone_verified'] is True
+    assert s.settings()['channels']==['sms']
+    monkeypatch.setattr(school,'fetch',lambda *a,**kw:(b'[]',{}))
+    assert school.load_items(s,'canvas',{'mode':'api','base':'https://school.instructure.com','token':'test'})==[]
+
 def configure(s,c,p,provider='gradescope',mode='upload'):
     r=c.post('/api/school/'+provider+'/configure',json={'project_id':p['id'],'mode':mode})
     assert r.status_code==200,r.text

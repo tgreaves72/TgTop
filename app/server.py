@@ -80,7 +80,8 @@ def limit(key, maximum=30, seconds=60):
     q.append(time.monotonic())
 
 def settings():
-    return store.config('settings', {'timezone':'America/New_York','quiet_start':'22:00','quiet_end':'07:00','channels':['desktop'], 'phone_verified':False})
+    defaults = {'timezone':'America/New_York','quiet_start':'22:00','quiet_end':'07:00','channels':['desktop'], 'phone_verified':False}
+    return {**defaults, **store.config('settings', {})}
 
 def audit(action, target=None, status='succeeded'):
     store.put('activity', {'action':action,'target':target,'status':status})
