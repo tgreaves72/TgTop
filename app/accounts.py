@@ -19,7 +19,7 @@ class Accounts:
     def __init__(self, owner):
         self.owner=owner
         self.registry=Store(owner.root/'account-index')
-        self.stores={'owner':owner};self.vaults={};self.connections={};self.lock=threading.RLock()
+        self.stores={'owner':owner};self.vaults={};self.connections={};self.sessions={};self.lock=threading.RLock()
         self.ensure_owner()
     @staticmethod
     def username(value):
@@ -69,9 +69,19 @@ class Accounts:
         hashed=token_hash(token)
         import secrets
         from .store import now
+        cached=self.sessions.get(hashed)
+        if cached:
+            identifier,record_id=cached
+            s=self.get(identifier).get(record_id)
+            if s and not s['deleted'] and not s.get('revoked') and s['expires']>now() and secrets.compare_digest(s['token_hash'],hashed):return identifier
+            self.sessions.pop(hashed,None)
+            return None
         for identifier in set(self.entries().values()):
             for s in self.get(identifier).list('session'):
-                if secrets.compare_digest(s['token_hash'],hashed) and not s.get('revoked') and s['expires']>now():return identifier
+                if secrets.compare_digest(s['token_hash'],hashed) and not s.get('revoked') and s['expires']>now():
+                    if len(self.sessions)>=4096:self.sessions.clear()
+                    self.sessions[hashed]=(identifier,s['id'])
+                    return identifier
         return None
     def by_phone(self, phone):
         matches=[]

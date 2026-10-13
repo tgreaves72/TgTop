@@ -86,16 +86,20 @@ def incoming(s,data):
         guid=data['guid'];body=data['text']
         if not isinstance(guid,str) or not 1<=len(guid)<=128 or not isinstance(body,str) or len(body)>2000:return
         s.limit('spectrum:'+data['sender'],10,60)
-        if not s.store.claim('spectrum:'+guid):return
+        from .remote import receive,finish
+        record=receive(s,'photon_spectrum',guid,data['sender'],body)
+        if record['status']!='received':return
         from .phone_ai import command
         import asyncio
         if body.lower().startswith('ai '):
-            future=asyncio.run_coroutine_threadsafe(command(s,body),s.app.state.main_loop)
+            future=asyncio.run_coroutine_threadsafe(command(s,body,record['id']),s.app.state.main_loop)
             try:answer=future.result(timeout=60)
             except TimeoutError:
                 future.cancel()
-                answer='AI request timed out. Review TgTop activity before retrying.'
-        else:answer=s.remote_command(body)
-        s.messaging.send(cfg,data['sender'],answer)
+                current=s.store.get(record['id'])
+                if current['status']=='received':s.store.put('remote_command',dict(current,status='failed',error='AI request timed out; review before retry'),current['id'],current['version'])
+        else:answer=finish(s,record['id'],lambda:s.remote_command(body))
+        from .remote import replies
+        replies(s)
         s.audit('photon_command')
     except Exception:s.audit('photon_command',status='failed')

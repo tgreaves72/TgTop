@@ -5,6 +5,7 @@ import os
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -23,6 +24,8 @@ class Store:
         self.root.mkdir(parents=True, exist_ok=True)
         if os.name != 'nt': os.chmod(self.root,0o700)
         (self.root / 'blobs').mkdir(exist_ok=True)
+        from .recovery import recover
+        recover(self.root)
         keyfile = self.root / 'server.key'
         if keyfile.exists():
             encoded = keyfile.read_bytes()
@@ -93,8 +96,22 @@ class Store:
             return json.loads(self.decrypt(row[0])) if row else default
 
     def set_config(self, name, value):
-        with self.lock, self.db:
+        with self.transaction():
             self.db.execute('INSERT OR REPLACE INTO config VALUES(?,?)', (name, self.encrypt(json.dumps(value).encode())))
+
+    @contextmanager
+    def transaction(self):
+        """Nested savepoints keep records, events and operation receipts atomic."""
+        with self.lock:
+            name='tx_'+uuid.uuid4().hex
+            self.db.execute('SAVEPOINT '+name)
+            try:
+                yield
+                self.db.execute('RELEASE SAVEPOINT '+name)
+            except BaseException:
+                self.db.execute('ROLLBACK TO SAVEPOINT '+name)
+                self.db.execute('RELEASE SAVEPOINT '+name)
+                raise
 
     def get(self, id):
         with self.lock:
@@ -109,7 +126,7 @@ class Store:
             return [self.get(r[0]) for r in rows]
 
     def put(self, kind, data, id=None, version=None, deleted=False):
-        with self.lock, self.db:
+        with self.transaction():
             id = id or uid()
             old = self.get(id)
             if old and (version is None or version != old['version']):
@@ -123,7 +140,7 @@ class Store:
             return self.get(id)
 
     def claim(self, id):
-        with self.lock, self.db:
+        with self.transaction():
             try:
                 self.db.execute('INSERT INTO dedupe VALUES(?,?)', (id, now()))
                 return True

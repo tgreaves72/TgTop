@@ -1,0 +1,12 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync('web/app.js','utf8');
+const functions=source.slice(source.indexOf('function localDatetime('),source.indexOf('function projectModal('));
+const context=vm.createContext({state:{settings:{timezone:'America/New_York'}},Date,Intl});
+vm.runInContext(functions,context);
+assert.equal(vm.runInContext("accountInstant('2026-07-15T18:00')",context),'2026-07-15T22:00:00.000Z');
+assert.equal(vm.runInContext("accountInstant('2026-01-15T18:00')",context),'2026-01-15T23:00:00.000Z');
+assert.equal(vm.runInContext("localDatetime('2026-07-15T22:00:00Z')",context),'2026-07-15T18:00');
+assert.throws(()=>vm.runInContext("accountInstant('2026-03-08T02:30')",context),/does not exist/);
+const repeated=vm.runInContext("accountInstant('2026-11-01T01:30')",context);
+assert.equal(vm.runInContext(`localDatetime('${repeated}')`,context),'2026-11-01T01:30');
+console.log('Calendar timezone checks passed: account timezone, winter/summer offsets, DST gap rejection, repeated-time round trip.');

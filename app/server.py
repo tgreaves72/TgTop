@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import hashlib
 import json
 import os
 import re
@@ -41,8 +42,38 @@ if MODE == 'live' and not ORIGIN.startswith('https://'):
 DUMMY_PASSWORD_HASH = hasher.hash(secrets.token_urlsafe(32))
 rates = defaultdict(deque)
 KINDS = {'project','task','note','folder','reminder','conversation','workflow'}
+EDITABLE={
+    'project':{'title','space','description','ai_allowed','tags'},
+    'task':{'title','body','project_id','priority','status','due_at','recurrence','parent_id','dependencies','file_ids','tags'},
+    'note':{'title','body','project_id','tags'},
+    'folder':{'title','project_id','parent_id','tags'},
+    'reminder':{'title','task_id','project_id','due_at','channel','recurrence'},
+    'file':{'title','tags','folder_id','ai_allowed','project_id'},
+    'conversation':{'title','body','project_id'}
+}
+
+def editable(kind,data):
+    if not isinstance(data,dict):raise HTTPException(400,'Record data must be an object')
+    return {k:v for k,v in data.items() if k in EDITABLE.get(kind,set())}
 
 def limit(key, maximum=30, seconds=60):
+    if key.startswith(('login:','signup:','sms:','photon:','spectrum:','account-password:')):
+        registry=accounts.registry
+        with registry.transaction():
+            buckets=registry.config('security_rates',{})
+            current=time.time()
+            buckets={k:v for k,v in buckets.items() if v.get('until',0)>current}
+            identifier=hashlib.sha256(key.encode()).hexdigest()
+            bucket=buckets.get(identifier,{'attempts':[],'until':current+seconds})
+            attempts=[t for t in bucket['attempts'] if t>current-seconds]
+            if len(attempts)>=maximum or (identifier not in buckets and len(buckets)>=2048):raise HTTPException(429,'Too many attempts; try again later')
+            buckets[identifier]={'attempts':attempts+[current],'until':current+seconds}
+            registry.set_config('security_rates',buckets)
+        return
+    if len(rates)>2048:
+        for stale in list(rates):
+            if not rates[stale] or rates[stale][-1]<time.monotonic()-300:rates.pop(stale,None)
+        if len(rates)>2048:raise HTTPException(429,'Too many active requests; try again later')
     q = rates[key]
     while q and q[0] < time.monotonic() - seconds: q.popleft()
     if len(q) >= maximum: raise HTTPException(429, 'Too many attempts; try again later')
@@ -72,6 +103,7 @@ def item(id, kind=None):
     return r
 
 def safe_record(r):
+    if r['kind'] == 'remote_command': return {k:v for k,v in r.items() if k not in ('body','reply','phone')}
     if r['kind'] == 'credential': return {k:v for k,v in r.items() if k != 'ciphertext'}
     if r['kind'] == 'session': return {k:v for k,v in r.items() if k != 'token_hash'}
     return r
@@ -80,6 +112,11 @@ def validate(kind, data, id=None):
     if kind not in KINDS | {'file'}: raise HTTPException(400, 'Unsupported record type')
     if kind in ('project','task','note','folder') and not str(data.get('title','')).strip(): raise HTTPException(400, 'Title is required')
     if len(json.dumps(data)) > 100000: raise HTTPException(413, 'Record too large')
+    for field in ('title','body','description'):
+        if field in data and not isinstance(data[field],str):raise HTTPException(400,field+' must be text')
+    for field in ('dependencies','file_ids','tags'):
+        if field in data and (not isinstance(data[field],list) or len(data[field])>200 or any(not isinstance(v,str) for v in data[field])):raise HTTPException(400,field+' must be a list of text values')
+    if 'ai_allowed' in data and type(data['ai_allowed']) is not bool:raise HTTPException(400,'AI permission must be true or false')
     if data.get('project_id'): item(data['project_id'], 'project')
     if kind == 'project' and data.get('space','personal') not in ('personal','school','work'): raise HTTPException(400, 'Invalid space')
     if kind == 'task':
@@ -113,15 +150,32 @@ def validate(kind, data, id=None):
         if data.get('channel') not in ('desktop','sms'): raise HTTPException(400, 'Invalid channel')
         if data.get('recurrence') not in (None,'','daily','weekly'): raise HTTPException(400, 'Invalid reminder recurrence')
 
-def recurrence_due(iso, recurrence):
+def recurrence_due(iso, recurrence, anchor_day=None):
     dt = datetime.fromisoformat(iso).astimezone(ZoneInfo(settings()['timezone']))
     if recurrence == 'monthly':
         import calendar
         month = dt.month % 12 + 1
         year = dt.year + (dt.month == 12)
-        dt = dt.replace(year=year, month=month, day=min(dt.day,calendar.monthrange(year,month)[1]))
+        dt = dt.replace(year=year, month=month, day=min(anchor_day or dt.day,calendar.monthrange(year,month)[1]))
     else: dt += timedelta(days=7 if recurrence == 'weekly' else 1)
     return dt.astimezone(timezone.utc).isoformat()
+
+def save_task(data,id=None,version=None):
+    """All channels share dependency validation and atomic recurrence creation."""
+    with store.transaction():
+        old=store.get(id) if id else None
+        if old and (old.get('due_at')!=data.get('due_at') or old.get('recurrence')!=data.get('recurrence')):
+            data=dict(data);data.pop('recurrence_anchor',None)
+        validate('task',data,id)
+        result=store.put('task',data,id,version)
+        if old and data.get('status')=='done' and old.get('status')!='done' and old.get('recurrence'):
+            occurrence='recurrence:'+old['id']
+            if store.claim(occurrence):
+                next_task={k:v for k,v in old.items() if k not in ('id','version','created_at','updated_at')}
+                anchor=old.get('recurrence_anchor') or datetime.fromisoformat(old.get('due_at') or now()).astimezone(ZoneInfo(settings()['timezone'])).day
+                next_task.update(status='open',due_at=recurrence_due(old.get('due_at') or now(),old['recurrence'],anchor),recurrence_anchor=anchor,series_id=old.get('series_id') or old['id'])
+                store.put('task',next_task)
+        return result
 
 def send_sms(text):
     cfg = settings()
@@ -144,6 +198,8 @@ def quiet_until(current):
     return target.astimezone(timezone.utc)
 
 def tick(current=None):
+    from .remote import replies
+    import sys
     provider=messaging.config(store)
     if provider.get('provider')=='photon_spectrum' and messaging.configured(provider):
         from .spectrum import bridge, incoming
@@ -151,6 +207,7 @@ def tick(current=None):
         bridge.callback=lambda data:incoming(sys.modules[__name__],data)
         try:bridge.ensure(provider)
         except Exception:pass
+    replies(sys.modules[__name__])
     current = current or datetime.now(timezone.utc)
     for d in store.list('delivery'):
         if d.get('status')=='dispatching' and (current-datetime.fromisoformat(d['created_at'])).total_seconds()>60:
@@ -188,8 +245,9 @@ def tick(current=None):
             continue
         occurrence = f"reminder:{r['id']}:{r['due_at']}"
         # Durable outbox created before side effects; uncertain sends are never blindly resent.
-        if not store.claim(occurrence): continue
-        delivery = store.put('delivery', {'reminder_id':r['id'],'task_id':r['task_id'],'channel':r['channel'],'due_at':r['due_at'],'status':'dispatching','attempt':r.get('attempts',0)+1})
+        with store.transaction():
+            if not store.claim(occurrence): continue
+            delivery = store.put('delivery', {'reminder_id':r['id'],'task_id':r['task_id'],'channel':r['channel'],'due_at':r['due_at'],'status':'dispatching','attempt':r.get('attempts',0)+1})
         try:
             if r['channel'] == 'sms':
                 result = send_sms('TgTop: You have a task reminder. Open your private workspace to review it.')
@@ -254,7 +312,7 @@ def status():
         configured = bool(store.config('account'))
     except Exception:
         raise HTTPException(503, 'This saved workspace cannot be decrypted with its service key. Your files have been preserved. Recover the original service key or restore an encrypted backup; do not register a replacement account in this folder.')
-    return {'instance':os.environ.get('TGTOP_INSTANCE'), 'setup':not configured,'mode':MODE,'version':'0.1.0','sms':'configured' if messaging.configured(messaging.config(store)) else 'not connected','ai':'ChatGPT plan configured' if chatgpt.public()['connected'] and chatgpt.public()['plan_enabled'] and chatgpt.public()['model'] else ('ChatGPT setup incomplete' if chatgpt.public()['connected'] else ('configured' if os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_MODEL') else 'local-search simulator'))}
+    return {'instance':os.environ.get('TGTOP_INSTANCE'), 'setup':not configured,'mode':MODE,'version':'0.2.0','sms':'configured' if messaging.configured(messaging.config(store)) else 'not connected','ai':'ChatGPT plan configured' if chatgpt.public()['connected'] and chatgpt.public()['plan_enabled'] and chatgpt.public()['model'] else ('ChatGPT setup incomplete' if chatgpt.public()['connected'] else ('configured' if os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_MODEL') else 'local-search simulator'))}
 
 @app.post('/api/setup')
 async def setup(request: Request):
@@ -288,6 +346,8 @@ async def login(request: Request, response: Response):
         if not account:raise ValueError()
     except Exception:raise HTTPException(401,'Username or password is incorrect')
     account_context.set(identifier)
+    from .mfa import consume
+    consume(store,data.get('code'))
     token=secrets.token_urlsafe(48)
     session=store.put('session',{'token_hash':token_hash(token),'device':str(data.get('device','Browser'))[:80],'expires':(datetime.now(timezone.utc)+timedelta(days=7)).isoformat(),'revoked':False})
     response.set_cookie('tgtop_session',token,httponly=True,secure=ORIGIN.startswith('https://'),samesite='strict',max_age=604800)
@@ -302,32 +362,30 @@ def logout(response:Response, session=Depends(auth)):
     return {'ok':True}
 
 @app.get('/api/state')
-def state(session=Depends(auth)):
-    records = [safe_record(r) for r in store.list() if r['kind'] != 'session']
+def state(include_records:bool=True,session=Depends(auth)):
+    records = [safe_record(r) for r in store.list() if r['kind'] != 'session'] if include_records else []
     return {'account':{'username':store.config('account',{}).get('username',''),'is_owner':account_context.get()=='owner','name':store.config('account',{}).get('name','')},'records':records,'settings':{k:v for k,v in settings().items() if k != 'phone'},'phone_masked':('••••' + settings()['phone'][-4:]) if settings().get('phone') else None,'devices':[safe_record(s) for s in store.list('session')],'device_id':session['id'],'vault_configured':bool(store.config('vault')),'cursor':store.cursor(),'mode':MODE,'chatgpt':chatgpt.public(),'server_time':now()}
 
 @app.post('/api/records/{kind}')
 async def create(kind:str, request:Request, session=Depends(auth)):
-    data = await request.json()
+    data = editable(kind,await request.json())
+    if kind=='reminder':data['state']='pending'
     validate(kind,data)
     if kind == 'workflow': raise HTTPException(400,'Use approved workflow endpoint')
-    result = store.put(kind,data)
+    result = save_task(data) if kind=='task' else store.put(kind,data)
     audit('created',result['id'])
     return result
 
 @app.patch('/api/records/{id}')
 async def update(id:str, request:Request, session=Depends(auth)):
     old = item(id)
+    if old['kind'] not in KINDS-{'workflow'} | {'file'}:raise HTTPException(403,'Use the dedicated approval or service endpoint for this record')
     data = await request.json()
     if old['kind'] == 'file':
         data = {k:v for k,v in data.items() if k in ('version','title','tags','folder_id','ai_allowed','project_id')}
-    merged = dict(old,**{k:v for k,v in data.items() if k != 'version'})
+    merged = dict(old,**editable(old['kind'],data))
     validate(old['kind'], merged, id)
-    result = store.put(old['kind'],merged,id,data.get('version'))
-    if old['kind'] == 'task' and merged.get('status') == 'done' and old.get('status') != 'done' and old.get('recurrence'):
-        next_task = {k:v for k,v in old.items() if k not in ('id','version','created_at','updated_at')}
-        next_task.update(status='open',due_at=recurrence_due(old.get('due_at') or now(),old['recurrence']))
-        store.put('task',next_task)
+    result = save_task(merged,id,data.get('version')) if old['kind']=='task' else store.put(old['kind'],merged,id,data.get('version'))
     audit('updated',id)
     return result
 
@@ -459,32 +517,41 @@ def revoke(id:str,session=Depends(auth)):
 @app.get('/api/sync')
 def sync(after:int=0,session=Depends(auth)):
     events = store.events(after)
-    allowed = KINDS | {'file','credential','delivery','activity'}
+    allowed = KINDS | {'file','credential','delivery','activity','remote_command'}
     return {'events':[{**e,'record':safe_record(store.get(e['entity']))} for e in events if e['kind'] in allowed], 'cursor':events[-1]['seq'] if events else after,'server_time':now()}
 
 @app.post('/api/sync')
 async def sync_write(request:Request,session=Depends(auth)):
     data = await request.json()
-    results=[]
-    for change in data.get('changes',[])[:100]:
+    changes=data.get('changes',[])
+    if not isinstance(changes,list) or len(changes)>100:raise HTTPException(400,'Send at most 100 changes')
+    return {'results':[sync_change(change) for change in changes]}
+
+def sync_change(change):
+    import hashlib
+    if not isinstance(change,dict):raise HTTPException(400,'Invalid queued change')
+    with store.transaction():
         if change.get('kind') not in ('task','note'): raise HTTPException(403,'Only task and note edits can be queued')
         opid = change.get('operation_id')
-        if not opid: raise HTTPException(400,'Operation ID required')
+        if not isinstance(opid,str) or not 1<=len(opid)<=128: raise HTTPException(400,'Operation ID required')
+        if not isinstance(change.get('id'),str) or not isinstance(change.get('data'),dict):raise HTTPException(400,'Record ID and data required')
+        digest=hashlib.sha256(json.dumps(change,sort_keys=True,separators=(',',':')).encode()).hexdigest()
         prior = store.config('sync:'+opid)
         if prior:
-            results.append(prior); continue
+            if prior.get('request_hash') and prior['request_hash']!=digest:raise HTTPException(409,'Operation ID was already used for a different change')
+            return {k:v for k,v in prior.items() if k!='request_hash'}
         old = store.get(change['id'])
         if old and old['kind'] != change['kind']: raise HTTPException(403,'Record type mismatch')
         if old and (old['deleted'] or old['version'] != change.get('version')):
-            results.append({'operation_id':opid,'status':'conflict','current':safe_record(old),'proposed':change['data']}); continue
-        validate(change['kind'],change['data'],change['id'])
+            return {'operation_id':opid,'status':'conflict','current':safe_record(old),'proposed':change['data']}
+        proposed=dict(old or {},**editable(change['kind'],change['data']))
+        validate(change['kind'],proposed,change['id'])
         try:
-            r = store.put(change['kind'],change['data'],change['id'],change.get('version'))
+            r = save_task(proposed,change['id'],change.get('version')) if change['kind']=='task' else store.put(change['kind'],proposed,change['id'],change.get('version'))
             result={'operation_id':opid,'status':'saved','record':r}
-            store.set_config('sync:'+opid,result)
-            results.append(result)
-        except Conflict as e: results.append({'operation_id':opid,'status':'conflict','current':safe_record(e.current),'proposed':change['data']})
-    return {'results':results}
+            store.set_config('sync:'+opid,dict(result,request_hash=digest))
+            return result
+        except Conflict as e:return {'operation_id':opid,'status':'conflict','current':safe_record(e.current),'proposed':change['data']}
 
 @app.post('/api/deliveries/{id}/ack')
 def ack(id:str,session=Depends(auth)):
@@ -518,7 +585,7 @@ def authorized_context(query, project_id=None):
         if not p or p['deleted'] or not p.get('ai_allowed'): return False
         if r['kind']=='file' and not r.get('ai_allowed'): return False
         return all(source_allowed(s,seen|{id}) for s in r.get('source_ids',[]))
-    words = query.lower().split()
+    words = re.findall(r'\w+',query.lower())[:40]
     results=[]
     for r in store.list():
         if r['kind'] not in ('task','note','file','project','conversation'): continue
@@ -530,8 +597,16 @@ def authorized_context(query, project_id=None):
         if r['kind']=='file' and r['title'].lower().endswith(('.txt','.md','.csv','.json')):
             try: text += ' ' + file_content(r)[:20000].decode('utf-8',errors='replace')
             except Exception: pass
-        score = sum(w in text.lower() for w in words)
-        results.append({'id':r['id'],'kind':r['kind'],'project_id':pid,'title':r.get('title',''),'text':text[:12000],'status':r.get('status'),'due_at':r.get('due_at'),'score':score,'updated_at':r['updated_at']})
+        if r['kind']=='file' and r['title'].lower().endswith('.docx'):
+            try:
+                from .resume import inspect
+                text+=' '+ ' '.join(p['text'] for p in inspect(file_content(r))['paragraphs'])[:20000]
+            except Exception:pass
+        # Obvious credential patterns never enter provider context or a search excerpt.
+        text=re.sub(r'(?i)(?:sk-[A-Za-z0-9_-]{10,}|Bearer\s+\S+|AKIA[A-Z0-9]{16}|(?:password|api[_ -]?key|secret|token)\s*[:=]\s*["\']?[^\s,"\']+)', '[redacted credential]',text)
+        score = sum((3 if w in r.get('title','').lower() else 1) for w in words if w in text.lower())
+        if words and not score:continue
+        results.append({'id':r['id'],'version':r['version'],'kind':r['kind'],'project_id':pid,'title':r.get('title',''),'text':text[:12000],'status':r.get('status'),'due_at':r.get('due_at'),'score':score,'updated_at':r['updated_at']})
     return sorted(results,key=lambda r:r['score'],reverse=True)[:20]
 
 def execute_tool(name, args):
@@ -541,7 +616,7 @@ def execute_tool(name, args):
     if name == 'create_task':
         data={'title':args['title'],'project_id':project['id'],'due_at':args.get('due_at'),'status':'open','priority':'normal'}
         validate('task',data)
-        r=store.put('task',data); audit('assistant_created_task',r['id']); return r
+        r=save_task(data); audit('assistant_created_task',r['id']); return r
     if name == 'create_reminder':
         task=item(args['task_id'],'task')
         if task.get('project_id')!=project['id']: raise HTTPException(403,'Task outside project')
@@ -591,7 +666,7 @@ async def assistant(request:Request,session=Depends(auth)):
     pid=data.get('project_id')
     if pid:
         p=item(pid,'project')
-        if p.get('ai_allowed'): store.put('conversation',{'title':query[:100],'project_id':pid,'body':answer,'source_ids':[r['id'] for r in sources]})
+        if p.get('ai_allowed'): store.put('conversation',{'title':query[:100],'project_id':pid,'body':answer,'source_ids':[r['id'] for r in sources],'source_refs':[{'id':r['id'],'version':r.get('version'),'updated_at':r.get('updated_at')} for r in sources],'actions':actions,'mode':mode})
     audit('assistant_search',pid)
     return {'answer':answer,'mode':mode,'sources':[{k:v for k,v in r.items() if k not in ('text','score')} for r in sources],'actions':actions}
 
@@ -670,7 +745,7 @@ def remote_command(body):
         needle=lower[5:-9].strip(); matches=[t for t in store.list('task') if t['title'].lower()==needle]
         if len(matches)!=1: return 'Please specify one exact, unique task title.'
         t=matches[0]; validate('task',dict(t,status='done'),t['id'])
-        store.put('task',dict(t,status='done'),t['id'],t['version']); audit('sms_completed_task',t['id'])
+        save_task(dict(t,status='done'),t['id'],t['version']); audit('sms_completed_task',t['id'])
         return 'Task completed.'
     title=None; due=None
     if lower.startswith('add task '): title=text[9:]
@@ -684,7 +759,7 @@ def remote_command(body):
     if title:
         p=next((p for p in store.list('project') if p.get('space')=='personal'),None)
         if not p: return 'Create a personal project in TgTop first.'
-        t=store.put('task',{'title':title[:300],'project_id':p['id'],'status':'open','priority':'normal','due_at':due})
+        t=save_task({'title':title[:300],'project_id':p['id'],'status':'open','priority':'normal','due_at':due})
         if due: store.put('reminder',{'task_id':t['id'],'project_id':p['id'],'due_at':due,'channel':'sms','state':'pending'})
         audit('sms_created_task',t['id'])
         return 'Task created' + (' and reminder scheduled.' if due else '.')
@@ -710,12 +785,16 @@ async def incoming(request:Request):
         if msg.from_!=cfg['phone'] or msg.body!=form.get('Body','') or abs((datetime.now(timezone.utc)-msg.date_created).total_seconds())>300: raise ValueError()
     except Exception: raise HTTPException(403,'Message freshness check failed')
     limit('sms:'+cfg['phone'],10,60)
-    if not store.claim('sms:'+sid): return Response('<Response/>',media_type='application/xml')
-    try: answer=remote_command(form.get('Body',''))
-    except HTTPException: answer='Command could not be completed. Review dependencies in TgTop.'
-    from twilio.twiml.messaging_response import MessagingResponse
-    xml=MessagingResponse(); xml.message(answer)
-    return Response(str(xml),media_type='application/xml')
+    from .remote import receive,finish,replies
+    import sys
+    record=receive(sys.modules[__name__],'twilio',sid,cfg['phone'],form.get('Body',''))
+    if record['status']=='received':
+        def action():
+            try:return remote_command(form.get('Body',''))
+            except HTTPException:return 'Command could not be completed. Review dependencies in TgTop.'
+        finish(sys.modules[__name__],record['id'],action)
+    replies(sys.modules[__name__])
+    return Response('<Response/>',media_type='application/xml')
 
 @app.post('/api/simulator/sms')
 async def simulate(request:Request,session=Depends(auth)):
@@ -776,8 +855,12 @@ def make_backup(password):
             snapshot.close(); raw=path.read_bytes()
         with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
             z.writestr('tgtop.db',raw); z.writestr('server.key',store.key)
+            hashes={'tgtop.db':hashlib.sha256(raw).hexdigest(),'server.key':hashlib.sha256(store.key).hexdigest()}
             for p in (store.root/'blobs').iterdir():
-                if p.is_file(): z.write(p,'blobs/'+p.name)
+                if p.is_file():
+                    name='blobs/'+p.name
+                    z.write(p,name);hashes[name]=hashlib.sha256(p.read_bytes()).hexdigest()
+            z.writestr('manifest.json',json.dumps({'format':'tgtop-backup-v2','created_at':now(),'files':hashes}))
     salt=os.urandom(16); nonce=os.urandom(12); key=vault.derive(password,salt)
     audit('backup_created')
     return b'TGTOP1'+salt+nonce+AESGCM(key).encrypt(nonce,archive.getvalue(),b'TGTOP1')
@@ -794,24 +877,39 @@ async def backup_restore(request:Request,file:UploadFile=File(...),session=Depen
         payload=AESGCM(key).decrypt(raw[22:34],raw[34:],b'TGTOP1')
         z=zipfile.ZipFile(io.BytesIO(payload))
         if sum(i.file_size for i in z.infolist())>RESTORE_EXPANDED_BYTES: raise ValueError()
+        if len(z.namelist())!=len(set(z.namelist())):raise ValueError()
+        if 'manifest.json' in z.namelist():
+            manifest=json.loads(z.read('manifest.json'))
+            if manifest.get('format')!='tgtop-backup-v2' or set(manifest['files'])!=set(z.namelist())-{'manifest.json'}:raise ValueError()
+            for name,digest in manifest['files'].items():
+                if hashlib.sha256(z.read(name)).hexdigest()!=digest:raise ValueError()
         key_bytes=z.read('server.key'); db_bytes=z.read('tgtop.db')
         if len(key_bytes)!=32: raise ValueError()
         check=sqlite3.connect(':memory:'); check.deserialize(db_bytes)
         if check.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise ValueError()
         check.execute('SELECT * FROM migrations')
-        blob_data={i.filename[6:]:z.read(i) for i in z.infolist() if i.filename.startswith('blobs/') and re.fullmatch(r'blobs/[0-9a-f-]{36}',i.filename)}
+        blob_data={i.filename[6:]:z.read(i) for i in z.infolist() if re.fullmatch(r'blobs/([0-9a-f-]{36}|resume-recovery\.enc)',i.filename)}
     except Exception: raise HTTPException(400,'Backup is invalid or password is incorrect')
     # Preserve a recoverable pre-restore snapshot on this device.
     (store.root/'before-restore.tgtop').write_bytes(make_backup(str(form['password'])))
     receiving_username=store.config('account',{}).get('username')
     with store.lock:
         for s in list(vault.keys): vault.lock(s)
-        check.backup(store.db); check.close()
-        store.key=key_bytes; store.aes=AESGCM(key_bytes); store.save_key(key_bytes)
-        restored_account=store.config('account',{})
-        if receiving_username:store.set_config('account',dict(restored_account,username=receiving_username))
-        for name,content in blob_data.items(): (store.root/'blobs'/name).write_bytes(content)
-        for s in store.list('session'): store.put('session',dict(s,revoked=True),s['id'],s['version'])
+        from .recovery import prepare,recover,complete
+        journal=prepare(store)
+        old_key=store.key
+        try:
+            check.backup(store.db); check.close()
+            store.key=key_bytes; store.aes=AESGCM(key_bytes); store.save_key(key_bytes)
+            restored_account=store.config('account',{})
+            if receiving_username:store.set_config('account',dict(restored_account,username=receiving_username))
+            for name,content in blob_data.items(): (store.root/'blobs'/name).write_bytes(content)
+            for s in store.list('session'): store.put('session',dict(s,revoked=True),s['id'],s['version'])
+        except BaseException:
+            recover(store.root,store.db)
+            store.key=old_key;store.aes=AESGCM(old_key)
+            raise
+        else:complete(journal)
     return {'ok':True,'message':'Restored. All sessions revoked; sign in again.'}
 
 @app.get('/api/export')
@@ -870,6 +968,10 @@ import sys
 register(sys.modules[__name__])
 from .chatgpt import register as register_chatgpt
 register_chatgpt(sys.modules[__name__])
+from .remote import register as register_remote
+register_remote(sys.modules[__name__])
+from .mfa import register as register_mfa
+register_mfa(sys.modules[__name__])
 
 @app.middleware('http')
 async def select_account(request,call_next):

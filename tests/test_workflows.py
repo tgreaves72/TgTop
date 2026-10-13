@@ -133,9 +133,12 @@ def test_provider_signature_unauthorized_replay_and_outbound(env,monkeypatch):
     fake.messages.create.return_value=MagicMock(sid='SM'+'b'*32)
     monkeypatch.setattr('twilio.rest.Client',lambda *args:fake)
     r=c.post('/api/sms/incoming',data=payload,headers={'X-Twilio-Signature':sig})
-    assert r.status_code==200 and 'Task created' in r.text
+    assert r.status_code==200 and r.text=='<Response/>'
+    assert fake.messages.create.call_args.kwargs['body'].startswith('Task created')
+    assert fake.messages.create.call_count==1
     assert c.post('/api/sms/incoming',data=payload,headers={'X-Twilio-Signature':sig}).text=='<Response/>'
     assert len(s.store.list('task'))==1
+    assert fake.messages.create.call_count==1
     bad={**payload,'From':'+15555550999','MessageSid':'SM'+'c'*32}
     sigbad=RequestValidator('test-auth-token').compute_signature('https://example.test/api/sms/incoming',bad)
     assert c.post('/api/sms/incoming',data=bad,headers={'X-Twilio-Signature':sigbad}).status_code==403

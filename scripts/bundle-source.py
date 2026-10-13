@@ -6,9 +6,9 @@ root = Path(__file__).resolve().parents[1]
 files = [root / name for name in (
     '.dockerignore', '.env.example', '.gitignore', 'Dockerfile',
     'package.json', 'package-lock.json', 'requirements.txt',
-    'requirements.lock.txt', 'run.py', 'README.md', 'SECURITY.md', 'railway.json',
+    'requirements.lock.txt', 'run.py', 'README.md', 'SECURITY.md', 'LICENSE', 'railway.json',
 )]
-for directory in ('app', 'web', 'desktop', 'deploy', 'integrations', 'scripts', 'tests'):
+for directory in ('app', 'web', 'desktop', 'deploy', 'integrations', 'scripts', 'tests','.github'):
     files.extend(path for path in (root / directory).rglob('*')
                  if path.is_file() and '__pycache__' not in path.parts
                  and path.suffix not in ('.pyc', '.log') and path.name != '.env')

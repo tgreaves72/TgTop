@@ -27,6 +27,25 @@ def register(s):
             resume.replace_file(store.root/'blobs'/cfg['blob_id'],store.encrypt(data,cfg['blob_id'].encode()))
         else: resume.replace_file(cfg['path'],data)
 
+    def keep_revision(content,cfg):
+        identifier=uid()
+        (store.root/'blobs'/identifier).write_bytes(store.encrypt(content,b'tgtop-resume-history'))
+        history=store.config('resume_history',[])
+        history.append({'id':identifier,'filename':cfg.get('filename') or Path(cfg.get('path','Resume.docx')).name,'revision':hashlib.sha256(content).hexdigest(),'saved_at':s.now()})
+        store.set_config('resume_history',history[-20:])
+        for old in history[:-20]:(store.root/'blobs'/old['id']).unlink(missing_ok=True)
+
+    @app.get('/api/resume/history')
+    def history(session=Depends(auth)):
+        return list(reversed(store.config('resume_history',[])))
+
+    @app.get('/api/resume/history/{identifier}')
+    def version(identifier:str,session=Depends(auth)):
+        entry=next((h for h in store.config('resume_history',[]) if h['id']==identifier),None)
+        if not entry:raise HTTPException(404,'Resume revision not found')
+        content=store.decrypt((store.root/'blobs'/identifier).read_bytes(),b'tgtop-resume-history')
+        return Response(content,media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(entry['filename'])})
+
     @app.post('/api/resume/upload')
     async def upload_resume(file:UploadFile=File(...),session=Depends(auth)):
         name=Path((file.filename or '').replace('\\','/')).name
@@ -86,6 +105,8 @@ def register(s):
                 raise HTTPException(409,'Resume changed outside TgTop. Reload it before saving your edits.')
             try: updated=resume.edit(original,data.get('paragraphs'))
             except ValueError as e: raise HTTPException(400,str(e))
+            if updated==original:return {'revision':data['revision'],'ok':True}
+            keep_revision(original,cfg)
             # Recovery copy is encrypted and excluded from exports and AI context.
             recovery_id=uid() if cfg.get('blob_id') else 'resume-recovery.enc'
             recovery=store.root/'blobs'/recovery_id
@@ -106,6 +127,7 @@ def register(s):
             if hashlib.sha256(content).hexdigest()!=data.get('revision'):
                 raise HTTPException(409,'Resume changed; reload it before restoring')
             original=store.decrypt((store.root/'blobs'/cfg.get('recovery_id','resume-recovery.enc')).read_bytes(),b'tgtop-resume-recovery')
+            keep_revision(content,source)
             try: write_resume(source,original)
             except OSError: raise HTTPException(409,'Close Word and try again')
             store.set_config('resume_recovery',{})
@@ -181,10 +203,12 @@ def register(s):
             if actual.get('from')!=sender or actual.get('text')!=body or abs(time.time()-created)>300: raise ValueError()
         except Exception: raise HTTPException(403,'Message freshness check failed')
         s.limit('photon:'+sender,10,60)
-        if not store.claim('photon:'+guid): return {'status':'duplicate'}
+        from .remote import receive,finish,replies
+        record=receive(s,'photon',guid,sender,body)
+        if record['status']!='received':return {'status':'duplicate'}
         try:
-            answer=s.remote_command(body)
-            messaging.send(cfg,sender,answer)
+            finish(s,record['id'],lambda:s.remote_command(body))
+            replies(s)
             s.audit('photon_command')
             return {'status':'succeeded'}
         except Exception:

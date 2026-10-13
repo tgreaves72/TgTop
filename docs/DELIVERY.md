@@ -1,3 +1,7 @@
+# Current release
+
+See [TgTop 0.2](RELEASE-0.2.md) for current behavior and remaining work. The sections below record earlier implementation stages and their verification at that time.
+
 # TgTop delivery report
 
 October 11, 2026 · Functional early release 0.1.0

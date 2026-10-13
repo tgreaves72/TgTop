@@ -4,7 +4,7 @@ A working personal workspace for tasks, project files, notes, reminders, and enc
 
 ## Start
 
-Install **TgTop Setup 0.1.0.exe** from `release/`, then launch TgTop. No Python installation is required by the packaged Windows app. Sign up with a unique username and a strong password. Each user gets a separate encrypted workspace. On later launches, your saved session opens the workspace; after sign-out or seven days, use Log in with that username and password. Existing single-account workspaces keep their records, password, and sessions; migration adds a lowercase username based on the existing name. Closing or updating the app does not erase your records. Your vault password is separate. Your private phone setting has been provisioned on this PC, unverified; verify it in Connections. It is intentionally absent from the installer and source, so other installations need private configuration.
+Install **TgTop Setup 0.2.0.exe** from `release/`, then launch TgTop. No Python installation is required by the packaged Windows app. Sign up with a unique username and a strong password. Each user gets a separate encrypted workspace. On later launches, your saved session opens the workspace; after sign-out or seven days, use Log in with that username and password. Existing single-account workspaces keep their records, password, and sessions; migration adds a lowercase username based on the existing name. Closing or updating the app does not erase your records. Your vault password is separate.
 
 For source development, use Python 3.12 and Node 24. Run `npm ci` to install the official Photon Spectrum SDK before connecting Photon:
 
@@ -20,9 +20,11 @@ For an isolated fictional demo, run `.\.venv\Scripts\python.exe scripts/demo.py`
 
 ## Calendar, resume, and messaging update
 
-Tasks now opens a month calendar with task entries, clickable dates, undated tasks, and overdue tasks. Resume replaces the general Notes page and edits text in a privately linked original Word file, with revision conflict protection and an encrypted previous-save recovery copy. Project notes are preserved. See [Resume editing](docs/RESUME.md).
+Tasks opens a month, week, or agenda calendar with task entries, clickable dates, undated tasks, and overdue tasks. Resume replaces the general Notes page and edits text in a privately linked original Word file, with revision conflict protection and an encrypted previous-save recovery copy. Project notes are preserved. See [Resume editing](docs/RESUME.md).
 
-Real messaging can be configured privately inside Connections & devices using Photon or Twilio. The Photon adapter uses the official Advanced iMessage HTTP Proxy and signed Photon Webhook bridge, not Spectrum project credentials. A provider account, SMS access, recipient verification, and public HTTPS hosting are still needed. See [Messaging setup](docs/MESSAGING.md). No live messaging is configured or claimed by this release.
+Messaging can be configured privately in Connections using Photon Spectrum, the Photon HTTP bridge, or Twilio. Spectrum project credentials use an authenticated provider stream; HTTP providers require the configured HTTPS webhook. Verify phone ownership before using commands. Provider accounts and access requirements vary. See [Messaging setup](docs/MESSAGING.md). Development simulation never sends a real message.
+
+Read the [0.2 release notes](docs/RELEASE-0.2.md) for authenticator login, recoverable phone replies, atomic sync, calendar views, resume history, and Windows background settings.
 
 ## What you can use now
 
