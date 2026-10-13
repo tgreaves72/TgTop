@@ -20,7 +20,7 @@ This release implements the roadmap’s first security, reliability, and daily-u
 
 ## Validation and limits
 
-Release verification passed 49 tests on Windows and 47 tests inside the Linux deployment image; two Windows-specific tests skipped on Linux. The packaged Windows service passed task, file, vault, encrypted-backup, and PWA checks. Browser inspection verified month, week, agenda, and account-security controls against fictional demo data. JavaScript checks verified account isolation, cloud-address validation, and timezone conversion, including daylight-saving gaps. The deployed service reports version 0.2.0 and passes its health check. Windows packaging remains unsigned.
+Release verification passed 49 tests on Windows and 47 tests inside the Linux deployment image; two Windows-specific tests skipped on Linux. The packaged Windows service passed task, file, vault, encrypted-backup, and PWA checks. Browser inspection verified month, week, agenda, and account-security controls against fictional demo data. JavaScript checks verified account isolation, cloud-address validation, and timezone conversion, including daylight-saving gaps. GitHub’s Windows/Linux verification workflow also passed. The cloud initially reported version 0.2.0 and passed its deployment health check; subsequent connectivity checks timed out. Cloud availability therefore requires further host investigation. The Windows installer completed successfully and the installed application launched. Windows packaging remains unsigned.
 
 Provider transport tests use explicit mocks. This release does not send a live verification or reminder message, initiate an AI request against the user’s plan, or enable two-factor login on the user’s behalf. Existing connections remain configured.
 
