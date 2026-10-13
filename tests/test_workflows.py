@@ -20,6 +20,7 @@ def env(tmp_path,monkeypatch):
     client.headers.update({'Origin':s.ORIGIN,'X-TgTop':'1'})
     assert client.post('/api/setup',json={'name':'Test','password':'account-pass-12345'}).status_code==200
     assert client.post('/api/login',json={'username':'test','password':'account-pass-12345','device':'Device A'}).status_code==200
+    s.store.set_config('settings',dict(s.settings(),calendar_sms=False))
     yield s,client,tmp_path
     s.store.db.close()
 

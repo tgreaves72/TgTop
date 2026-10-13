@@ -80,7 +80,7 @@ def limit(key, maximum=30, seconds=60):
     q.append(time.monotonic())
 
 def settings():
-    defaults = {'timezone':'America/New_York','quiet_start':'22:00','quiet_end':'07:00','channels':['desktop'], 'phone_verified':False}
+    defaults = {'timezone':'America/New_York','quiet_start':'22:00','quiet_end':'07:00','channels':['desktop'], 'phone_verified':False,'calendar_sms':True}
     return {**defaults, **store.config('settings', {})}
 
 def audit(action, target=None, status='succeeded'):
@@ -161,6 +161,27 @@ def recurrence_due(iso, recurrence, anchor_day=None):
     else: dt += timedelta(days=7 if recurrence == 'weekly' else 1)
     return dt.astimezone(timezone.utc).isoformat()
 
+def calendar_reminder(task, current=None):
+    """Maintain one durable SMS reminder per dated task, without retroactive texts."""
+    import uuid
+    current=current or datetime.now(timezone.utc)
+    identifier=str(uuid.uuid5(uuid.NAMESPACE_URL,'tgtop-calendar-sms:'+task['id']))
+    old=store.get(identifier)
+    active=settings()['calendar_sms'] and not task.get('deleted') and task.get('status')!='done' and task.get('due_at')
+    if not active:
+        if old and old.get('state') in ('pending','retry'):
+            store.put('reminder',dict(old,state='cancelled'),identifier,old['version'])
+        return
+    deadline=datetime.fromisoformat(task['due_at']).astimezone(timezone.utc)
+    at=(deadline-timedelta(hours=1)).isoformat()
+    if old and not old['deleted'] and old.get('due_at')==at and old.get('state')!='cancelled':
+        if old.get('project_id')!=task.get('project_id'):
+            store.put('reminder',dict(old,project_id=task.get('project_id')),identifier,old['version'])
+        return
+    data={'task_id':task['id'],'project_id':task.get('project_id'),'due_at':at,
+          'channel':'sms','calendar_auto':True,'state':'pending' if deadline>current else 'expired'}
+    store.put('reminder',data,identifier,old['version'] if old else None)
+
 def save_task(data,id=None,version=None):
     """All channels share dependency validation and atomic recurrence creation."""
     with store.transaction():
@@ -169,13 +190,14 @@ def save_task(data,id=None,version=None):
             data=dict(data);data.pop('recurrence_anchor',None)
         validate('task',data,id)
         result=store.put('task',data,id,version)
+        calendar_reminder(result)
         if old and data.get('status')=='done' and old.get('status')!='done' and old.get('recurrence'):
             occurrence='recurrence:'+old['id']
             if store.claim(occurrence):
                 next_task={k:v for k,v in old.items() if k not in ('id','version','created_at','updated_at')}
                 anchor=old.get('recurrence_anchor') or datetime.fromisoformat(old.get('due_at') or now()).astimezone(ZoneInfo(settings()['timezone'])).day
                 next_task.update(status='open',due_at=recurrence_due(old.get('due_at') or now(),old['recurrence'],anchor),recurrence_anchor=anchor,series_id=old.get('series_id') or old['id'])
-                store.put('task',next_task)
+                save_task(next_task)
         return result
 
 def send_sms(text):
@@ -210,6 +232,9 @@ def tick(current=None):
         except Exception:pass
     replies(sys.modules[__name__])
     current = current or datetime.now(timezone.utc)
+    # Reconcile legacy, restored and offline-synced tasks after every restart.
+    for task in store.list('task'):
+        calendar_reminder(task,current)
     for d in store.list('delivery'):
         if d.get('status')=='dispatching' and (current-datetime.fromisoformat(d['created_at'])).total_seconds()>60:
             store.put('delivery',dict(d,status='needs_review',error='Service restarted during dispatch; review provider history before retry'),d['id'],d['version'])
@@ -238,9 +263,17 @@ def tick(current=None):
             store.put('workflow',dict(w,status='failed',error='Interrupted execution; create a new approved run'),w['id'],w['version'])
     for r in store.list('reminder'):
         if r.get('state','pending') not in ('pending','retry'): continue
+        if r.get('calendar_auto'):
+            task=store.get(r['task_id'])
+            if not task or task['deleted'] or task.get('status')=='done' or not settings()['calendar_sms']:
+                store.put('reminder',dict(r,state='cancelled'),r['id'],r['version'])
+                continue
+            if datetime.fromisoformat(task['due_at'])<=current:
+                store.put('reminder',dict(r,state='expired'),r['id'],r['version'])
+                continue
         due = datetime.fromisoformat(r.get('retry_at') or r['due_at'])
         if due > current: continue
-        quiet = quiet_until(current)
+        quiet = None if r.get('calendar_auto') else quiet_until(current)
         if quiet:
             store.put('reminder',dict(r,retry_at=quiet.isoformat()),r['id'],r['version'])
             continue
@@ -508,13 +541,14 @@ async def credential_service(request:Request,session=Depends(auth)):
 async def save_settings(request:Request,session=Depends(auth)):
     data = await request.json()
     cfg = settings()
-    for k in ('timezone','quiet_start','quiet_end','channels'):
+    for k in ('timezone','quiet_start','quiet_end','channels','calendar_sms'):
         if k in data: cfg[k]=data[k]
     try: ZoneInfo(cfg['timezone'])
     except Exception: raise HTTPException(400,'Unknown timezone')
     for k in ('quiet_start','quiet_end'):
         if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',cfg[k]): raise HTTPException(400,'Invalid quiet hours')
     if not set(cfg['channels']).issubset({'sms','desktop'}): raise HTTPException(400,'Invalid channels')
+    if type(cfg['calendar_sms']) is not bool:raise HTTPException(400,'Calendar SMS preference must be true or false')
     store.set_config('settings',cfg)
     return {'ok':True}
 

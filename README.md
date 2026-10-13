@@ -131,3 +131,9 @@ ChatGPT plan sign-in and phone AI setup: see [CHATGPT.md](docs/CHATGPT.md).
 ## Shared cloud accounts
 
 Connect before login using **Connect cloud account**, then use the same service address and username on every device. Connections now shows the active service and last sync check. HTTPS service validation preserves the current connection on failure. Your local workspace stays recoverable and separate. See [multi-device setup and migration](docs/CLOUD.md). Hosting is required; this package has not deployed a live cloud service.
+# Automatic calendar texts
+
+Each open task with a due date schedules one SMS one hour before its deadline by default. This includes approved school imports and existing tasks. Change this preference in Setup & settings. Automatic calendar texts bypass quiet hours to preserve the requested timing; manually scheduled reminders still respect quiet hours. New tasks with less than one hour remaining send on the next scheduler check. Overdue tasks expire without a late text. Completing, deleting, or removing a task's due date cancels its pending automatic reminder; moving the due date reschedules it. Recurring task occurrences receive separate reminders.
+
+The always-on service needs a connected messaging provider and a live verified phone. Texts contain a generic private reminder notice. Failed or uncertain sends appear in delivery history and require review before retry. Hosting/provider interruptions can delay delivery; the app cannot guarantee exact arrival time.
+
