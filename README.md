@@ -4,6 +4,8 @@ A working personal workspace for tasks, project files, notes, reminders, and enc
 
 ## Start
 
+Canvas, Outlook, and Gradescope deadline connection options live under **Connections & devices → School connections**. New items enter review before becoming calendar tasks. Approved source changes refresh on the backend, with conflict handling and duplicate prevention. Gradescope uses Canvas-linked assignments or manual CSV/ICS schedules; it has no direct public API. Microsoft sign-in requires an Entra application registration. See [school connection setup and limitations](docs/SCHOOL-CONNECTIONS.md). These connectors are deployed to the shared cloud service; existing cloud-connected desktop installations receive them on refresh. The 0.2.0 installer’s bundled standalone backend predates this connector update; use the current source for standalone local connector support.
+
 Install **TgTop Setup 0.2.0.exe** from `release/`, then launch TgTop. No Python installation is required by the packaged Windows app. Sign up with a unique username and a strong password. Each user gets a separate encrypted workspace. On later launches, your saved session opens the workspace; after sign-out or seven days, use Log in with that username and password. Existing single-account workspaces keep their records, password, and sessions; migration adds a lowercase username based on the existing name. Closing or updating the app does not erase your records. Your vault password is separate.
 
 For source development, use Python 3.12 and Node 24. Run `npm ci` to install the official Photon Spectrum SDK before connecting Photon:

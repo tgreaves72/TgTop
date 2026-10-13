@@ -274,12 +274,23 @@ async def scheduler():
         except Exception: pass # Never log request bodies, phone numbers or credentials.
         await asyncio.sleep(10)
 
+async def school_scheduler():
+    from .school import tick as school_tick
+    while True:
+        for identifier in set(accounts.entries().values()):
+            with accounts.use(identifier):
+                try: await asyncio.to_thread(school_tick,sys.modules[__name__])
+                except Exception: pass
+        await asyncio.sleep(60)
+
 @asynccontextmanager
 async def lifespan(app):
     app.state.main_loop=asyncio.get_running_loop()
     task = asyncio.create_task(scheduler())
+    school_task = asyncio.create_task(school_scheduler())
     yield
     task.cancel()
+    school_task.cancel()
     from .spectrum import bridge
     from .spectrum import close_all
     close_all()
@@ -517,7 +528,7 @@ def revoke(id:str,session=Depends(auth)):
 @app.get('/api/sync')
 def sync(after:int=0,session=Depends(auth)):
     events = store.events(after)
-    allowed = KINDS | {'file','credential','delivery','activity','remote_command'}
+    allowed = KINDS | {'file','credential','delivery','activity','remote_command','school_deadline'}
     return {'events':[{**e,'record':safe_record(store.get(e['entity']))} for e in events if e['kind'] in allowed], 'cursor':events[-1]['seq'] if events else after,'server_time':now()}
 
 @app.post('/api/sync')
@@ -972,6 +983,8 @@ from .remote import register as register_remote
 register_remote(sys.modules[__name__])
 from .mfa import register as register_mfa
 register_mfa(sys.modules[__name__])
+from .school import register as register_school
+register_school(sys.modules[__name__])
 
 @app.middleware('http')
 async def select_account(request,call_next):
@@ -982,6 +995,10 @@ async def select_account(request,call_next):
     if request.url.path=='/auth/callback':
         state=request.query_params.get('state','')
         identifier=next((i for i in set(accounts.entries().values()) if state and secrets.compare_digest(accounts.get(i).config('chatgpt_pending',{}).get('state',''),state)),None)
+    if request.url.path=='/school/outlook/callback':
+        state=request.query_params.get('state','')
+        identifier=next((i for i in set(accounts.entries().values()) if state and secrets.compare_digest(accounts.get(i).config('school_outlook',{}).get('oauth_flow',{}).get('state',''),state)),None)
+        if identifier is None:return JSONResponse({'detail':'Invalid Outlook authorization state'},status_code=400)
     if request.url.path=='/api/sms/photon/incoming':
         try:
             payload=await request.json();identifier=accounts.by_phone(((payload.get('data') or {}).get('handle') or {}).get('address'))

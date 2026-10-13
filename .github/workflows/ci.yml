@@ -33,6 +33,7 @@ jobs:
       - run: python -m pytest -q
       - run: node --check web/app.js
       - run: node --check web/personal.js
+      - run: node --check web/school.js
       - run: node --check desktop/main.cjs
       - run: node scripts/account-ui-smoke.cjs
       - run: node scripts/cloud-connection-smoke.cjs
