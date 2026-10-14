@@ -53,6 +53,40 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 from test_workflows import env,project
 
+def test_refresh_terminal_errors_remove_only_unusable_credentials(env,monkeypatch):
+    from fastapi import HTTPException
+    import pytest
+    s,c,_=env
+    original={'client_id':'issued-client','subject':'owner','model':'test','access_token':'private-access',
+        'refresh_token':'private-refresh','id_token':'private-identity','scopes':['chatgpt.tokens.use.direct'],'expires':0}
+    async def exchange(fields):
+        response=httpx.Response(400,json={'error':'invalid_grant','error_description':'private-refresh'},request=httpx.Request('POST','https://auth.openai.com/token'))
+        raise httpx.HTTPStatusError('private-refresh',request=response.request,response=response)
+    monkeypatch.setattr(s.chatgpt,'exchange',exchange)
+    s.store.set_config('chatgpt',{'active':'one','accounts':{'one':original}})
+    with pytest.raises(HTTPException) as caught:asyncio.run(s.chatgpt.access())
+    assert caught.value.status_code==409 and 'fresh sign-in' in caught.value.detail
+    saved=s.chatgpt.selected()
+    assert saved['client_id']=='issued-client' and saved['subject']=='owner' and saved['model']=='test'
+    assert not any(saved.get(k) for k in ('access_token','refresh_token','id_token'))
+    assert s.chatgpt.public()['status']=='needs_attention'
+    assert 'private-' not in json.dumps(s.chatgpt.public())
+
+def test_refresh_client_and_temporary_errors_preserve_connection(env,monkeypatch):
+    from fastapi import HTTPException
+    import pytest
+    s,c,_=env
+    for status,body,expected in [(401,{'error':'invalid_client'},502),(503,{'error':{'code':'subscription_sharing_usage_unavailable'}},503),(400,{'detail':'private-refresh'},502)]:
+        s.store.set_config('chatgpt',{'active':'one','accounts':{'one':{'client_id':'issued-client','access_token':'private-access',
+            'refresh_token':'private-refresh','scopes':['chatgpt.tokens.use.direct'],'expires':0}}})
+        async def exchange(fields):
+            response=httpx.Response(status,json=body,request=httpx.Request('POST','https://auth.openai.com/token'))
+            raise httpx.HTTPStatusError('private-refresh',request=response.request,response=response)
+        monkeypatch.setattr(s.chatgpt,'exchange',exchange)
+        with pytest.raises(HTTPException) as caught:asyncio.run(s.chatgpt.access())
+        assert caught.value.status_code==expected and 'private-' not in caught.value.detail
+        assert s.chatgpt.selected()['refresh_token']=='private-refresh'
+
 def test_oauth_pkce_state_registration_and_encrypted_tokens(env,monkeypatch):
     s,c,root=env
     from fastapi.testclient import TestClient

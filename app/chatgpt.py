@@ -16,6 +16,14 @@ AUTHORIZE=ISSUER+'/api/accounts/authorize'
 TOKEN=ISSUER+'/api/accounts/oauth/token'
 RESOURCE='https://api.openai.com/v1'
 SCOPES='openid profile email offline_access resource.invoke chatgpt.tokens.use.direct'
+TERMINAL_REFRESH={'invalid_grant','invalid_refresh_token','token_expired','refresh_token_expired','refresh_token_invalidated','refresh_token_reused'}
+
+def refresh_error_code(error):
+    try:body=error.response.json()
+    except Exception:return None
+    detail=body.get('error',body) if isinstance(body,dict) else None
+    code=detail.get('code') if isinstance(detail,dict) else detail
+    return code if isinstance(code,str) and code in TERMINAL_REFRESH|{'invalid_client'} else None
 
 def provider_failure(error):
     """Return actionable messages from allowlisted codes, never raw provider bodies."""
@@ -35,6 +43,8 @@ def provider_failure(error):
         'subscription_sharing_invalid_user':(409,'ChatGPT could not validate the saved session. Reconnect the selected account in Connections.'),
         'chatpass_v2_scope_not_authorized':(403,'ChatGPT plan permission does not authorize this request. Reconnect and approve plan usage.'),
         'chatpass_v2_invalid_authorization_context':(403,'ChatGPT rejected the saved permission context. Reconnect the selected account.'),
+        'subscription_sharing_usage_unavailable':(503,'ChatGPT could not check plan availability. Your saved connection remains intact. Try again later.'),
+        'subscription_sharing_user_unavailable':(503,'ChatGPT account information is temporarily unavailable. Your saved connection remains intact. Try again later.'),
     }
     if code in messages:return messages[code]
     if status==401:return 409,'ChatGPT rejected the saved session. Reconnect the selected account in Connections.'
@@ -151,9 +161,17 @@ class Connection:
                         expires=time.time()+float(data.get('expires_in',3600)),scopes=scopes)
                     cfg['accounts'][cfg['active']]=a;self.s.store.set_config('chatgpt',cfg)
                 except httpx.HTTPStatusError as error:
-                    if error.response.status_code in (400,401):
+                    code=refresh_error_code(error)
+                    if code in TERMINAL_REFRESH:
+                        # Retain the issued client and account identity for reauthorization.
+                        cfg=self.config();saved=cfg['accounts'][cfg['active']]
+                        for key in ('access_token','refresh_token','id_token'):saved.pop(key,None)
+                        self.s.store.set_config('chatgpt',cfg)
                         message='ChatGPT session needs a fresh sign-in. Reconnect the selected account in Connections.'
                         self.health(message);raise HTTPException(409,message) from None
+                    if code=='invalid_client':
+                        message='ChatGPT rejected TgTop’s client registration. The integration needs repair; repeating sign-in alone may not fix it.'
+                        self.health(message);raise HTTPException(502,message) from None
                     raise self.failure(error) from None
                 except Exception as error:raise self.failure(error) from None
             return a['access_token']
