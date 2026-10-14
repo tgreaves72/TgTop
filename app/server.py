@@ -726,7 +726,19 @@ async def assistant(request:Request,session=Depends(auth)):
     sources=authorized_context(query,data.get('project_id'))
     actions=[]
     use_chatgpt=bool(chatgpt.selected().get('access_token'))
-    if use_chatgpt or (account_context.get()=='owner' and os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_MODEL')):
+    if chatgpt.codex.active():
+        selected_project=data.get('project_id')
+        def scoped_tool(name,args):
+            args=dict(args)
+            if selected_project:
+                if args.get('project_id') and args['project_id']!=selected_project:raise HTTPException(403,'Outside the selected project')
+                args['project_id']=selected_project
+            return execute_tool(name,args)
+        result=await chatgpt.codex.run(query,
+            'You are TgTop, a personal task assistant. Use authorized TgTop tools to find project IDs and manage tasks. Cite source record IDs. Ask when dates or project choices are ambiguous. Never expose credentials or perform destructive or external actions. Current UTC: '+now()+'; timezone: '+settings()['timezone']+('; selected project ID: '+selected_project if selected_project else ''),
+            TOOLS,scoped_tool)
+        answer=result['answer'];actions=result['actions'];sources=result['sources'];mode='Codex · ChatGPT plan'
+    elif use_chatgpt or (account_context.get()=='owner' and os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_MODEL')):
         from openai import AsyncOpenAI
         client=None if use_chatgpt else AsyncOpenAI(timeout=40,max_retries=1)
         messages=[{'role':'user','content':query}]
@@ -1055,6 +1067,8 @@ import sys
 register(sys.modules[__name__])
 from .chatgpt import register as register_chatgpt
 register_chatgpt(sys.modules[__name__])
+from .codex_bridge import register as register_codex
+register_codex(sys.modules[__name__])
 from .remote import register as register_remote
 register_remote(sys.modules[__name__])
 from .mfa import register as register_mfa

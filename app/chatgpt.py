@@ -58,6 +58,8 @@ class Connection:
     def __init__(self, service):
         self.s=service
         self.lock=asyncio.Lock()
+        from .codex_bridge import Managed
+        self.codex=Managed(service.accounts.get() if hasattr(service,'accounts') else service.store)
 
     def config(self): return self.s.store.config('chatgpt',{'accounts':{},'active':None})
 
@@ -67,7 +69,7 @@ class Connection:
 
     def public(self):
         cfg=self.config();a=self.selected()
-        return {'connected':bool(a.get('access_token')),'plan_enabled':'chatgpt.tokens.use.direct' in a.get('scopes',[]),
+        return {'codex':self.codex.public(),'connected':bool(a.get('access_token')),'plan_enabled':'chatgpt.tokens.use.direct' in a.get('scopes',[]),
             'model':a.get('model',''),'active':cfg.get('active'),'status':a.get('status','not_checked'),
             'last_error':a.get('last_error'),'checked_at':a.get('checked_at'),
             'accounts':[{'id':k,'label':v.get('email') or 'ChatGPT account '+str(i+1)} for i,(k,v) in enumerate(cfg.get('accounts',{}).items())]}
@@ -194,6 +196,8 @@ class Connection:
 
     async def response(self, **fields):
         from openai import AsyncOpenAI
+        if fields.get('tools'):
+            fields['tools']=[{'type':'namespace','name':'tgtop','description':'Authorized TgTop workspace tools','tools':fields['tools']}]
         client=AsyncOpenAI(api_key=await self.access(),base_url=RESOURCE,max_retries=0,timeout=45)
         a=self.selected()
         if not a.get('model'):raise HTTPException(409,'Choose an available ChatGPT model in Connections.')
