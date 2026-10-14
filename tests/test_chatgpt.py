@@ -1,6 +1,52 @@
 import asyncio
 import json
 import time
+import httpx
+
+def test_provider_errors_are_actionable_and_redacted(env):
+    from app.chatgpt import provider_failure
+    for code,status,phrase in [
+        ('subscription_sharing_usage_limit_exceeded',429,'usage limit'),
+        ('subscription_sharing_user_not_eligible',403,'cannot use'),
+        ('subscription_sharing_invalid_user',409,'Reconnect'),
+    ]:
+        error=SimpleNamespace(body={'error':{'code':code,'message':'private-provider-token'}},status_code=400)
+        actual,message=provider_failure(error)
+        assert actual==status and phrase in message and 'private-provider-token' not in message
+
+def test_models_retry_one_401_and_record_health(env,monkeypatch):
+    s,c,_=env
+    s.store.set_config('chatgpt',{'active':'one','accounts':{'one':{'access_token':'old','refresh_token':'saved','client_id':'test','scopes':['chatgpt.tokens.use.direct'],'expires':time.time()+3600}}})
+    calls=[]
+    async def exchange(fields):
+        return {'access_token':'new','refresh_token':'rotated','expires_in':3600}
+    monkeypatch.setattr(s.chatgpt,'exchange',exchange)
+    class Client:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*a):pass
+        async def get(self,url,headers):
+            calls.append(headers['Authorization'])
+            code=401 if len(calls)==1 else 200
+            return httpx.Response(code,json={'models':[{'slug':'test','visibility':'list'}]},request=httpx.Request('GET',url))
+    monkeypatch.setattr('app.chatgpt.httpx.AsyncClient',lambda **kwargs:Client())
+    assert asyncio.run(s.chatgpt.models())==[{'slug':'test','display_name':'test'}]
+    assert calls==['Bearer old','Bearer new']
+    assert s.chatgpt.public()['status']=='ready'
+    assert s.chatgpt.selected()['refresh_token']=='rotated'
+
+def test_models_403_keeps_credentials_and_reports_attention(env,monkeypatch):
+    s,c,_=env
+    s.store.set_config('chatgpt',{'active':'one','accounts':{'one':{'access_token':'private-token','scopes':['chatgpt.tokens.use.direct'],'expires':time.time()+3600}}})
+    class Client:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*a):pass
+        async def get(self,url,headers):
+            return httpx.Response(403,json={'error':{'code':'subscription_sharing_user_not_eligible','message':'private-token'}},request=httpx.Request('GET',url))
+    monkeypatch.setattr('app.chatgpt.httpx.AsyncClient',lambda **kwargs:Client())
+    response=c.get('/api/chatgpt/models')
+    assert response.status_code==403 and 'cannot use' in response.text and 'private-token' not in response.text
+    assert s.chatgpt.public()['status']=='needs_attention'
+    assert s.chatgpt.selected()['access_token']=='private-token'
 from types import SimpleNamespace
 from urllib.parse import urlsplit,parse_qs
 import jwt

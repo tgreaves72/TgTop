@@ -137,3 +137,9 @@ Each open task with a due date schedules one SMS one hour before its deadline by
 
 The always-on service needs a connected messaging provider and a live verified phone. Texts contain a generic private reminder notice. Failed or uncertain sends appear in delivery history and require review before retry. Hosting/provider interruptions can delay delivery; the app cannot guarantee exact arrival time.
 
+# AI calendar meetings and connection recovery
+
+The assistant supports finite weekly meeting series with start and end times. Each occurrence appears immediately on the calendar and receives the usual automatic SMS reminder. Series scheduling preserves the account timezone through daylight-saving changes and prevents identical retries from creating duplicate meetings. Project AI permission still applies.
+
+Saved ChatGPT credentials mean an account is linked, not that live access has been checked. Model-list or inference success marks the connection checked; failures display redacted recovery guidance for session expiry, plan eligibility, usage limits, or temporary service failures. A rejected model-list token triggers at most one refresh and retry. TgTop preserves credentials on temporary failures and never switches to API billing automatically. See [OpenAI's recovery guidance](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+

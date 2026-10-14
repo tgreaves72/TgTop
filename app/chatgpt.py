@@ -17,6 +17,31 @@ TOKEN=ISSUER+'/api/accounts/oauth/token'
 RESOURCE='https://api.openai.com/v1'
 SCOPES='openid profile email offline_access resource.invoke chatgpt.tokens.use.direct'
 
+def provider_failure(error):
+    """Return actionable messages from allowlisted codes, never raw provider bodies."""
+    status=getattr(error,'status_code',None)
+    body=getattr(error,'body',None)
+    if isinstance(error,httpx.HTTPStatusError):
+        status=error.response.status_code
+        try:body=error.response.json()
+        except Exception:body=None
+    detail=body.get('error',body) if isinstance(body,dict) else {}
+    code=detail.get('code') if isinstance(detail,dict) else None
+    messages={
+        'subscription_sharing_user_not_eligible':(403,'This ChatGPT account or workspace cannot use its plan with TgTop. Check your workspace policy and plan eligibility.'),
+        'subscription_sharing_usage_limit_exceeded':(429,'TgTop has reached a ChatGPT plan usage limit. Check ChatGPT Settings → Usage and try again when access is available.'),
+        'subscription_sharing_unsupported_capability':(502,'ChatGPT rejected an unsupported request feature. No further actions were attempted. TgTop needs an integration update.'),
+        'subscription_sharing_route_not_supported':(502,'ChatGPT rejected this integration endpoint. TgTop needs an integration update.'),
+        'subscription_sharing_invalid_user':(409,'ChatGPT could not validate the saved session. Reconnect the selected account in Connections.'),
+        'chatpass_v2_scope_not_authorized':(403,'ChatGPT plan permission does not authorize this request. Reconnect and approve plan usage.'),
+        'chatpass_v2_invalid_authorization_context':(403,'ChatGPT rejected the saved permission context. Reconnect the selected account.'),
+    }
+    if code in messages:return messages[code]
+    if status==401:return 409,'ChatGPT rejected the saved session. Reconnect the selected account in Connections.'
+    if status==403:return 403,'ChatGPT denied access. Check plan eligibility, workspace policy, and the selected account.'
+    if status==429:return 429,'ChatGPT is temporarily limiting requests. Check your plan usage and try again later.'
+    return 502,'ChatGPT is temporarily unavailable or the request timed out. Your saved connection remains intact. Try again later.'
+
 class Connection:
     def __init__(self, service):
         self.s=service
@@ -31,8 +56,20 @@ class Connection:
     def public(self):
         cfg=self.config();a=self.selected()
         return {'connected':bool(a.get('access_token')),'plan_enabled':'chatgpt.tokens.use.direct' in a.get('scopes',[]),
-            'model':a.get('model',''),'active':cfg.get('active'),
+            'model':a.get('model',''),'active':cfg.get('active'),'status':a.get('status','not_checked'),
+            'last_error':a.get('last_error'),'checked_at':a.get('checked_at'),
             'accounts':[{'id':k,'label':v.get('email') or 'ChatGPT account '+str(i+1)} for i,(k,v) in enumerate(cfg.get('accounts',{}).items())]}
+
+    def health(self,error=None):
+        cfg=self.config();key=cfg.get('active')
+        if key in cfg.get('accounts',{}):
+            cfg['accounts'][key].update(status='needs_attention' if error else 'ready',last_error=error,checked_at=time.time())
+            self.s.store.set_config('chatgpt',cfg)
+
+    def failure(self,error):
+        status,message=provider_failure(error)
+        self.health(message)
+        return HTTPException(status,message)
 
     def begin(self, session, account=None):
         if self.s.ORIGIN!='http://127.0.0.1:8765':
@@ -99,12 +136,12 @@ class Connection:
             self.s.audit('chatgpt_connected')
             return 'chatgpt.tokens.use.direct' in a['scopes']
 
-    async def access(self):
+    async def access(self,force=False):
         async with self.lock:
             cfg=self.config();a=self.selected()
             if not a.get('access_token') or 'chatgpt.tokens.use.direct' not in a.get('scopes',[]):
                 raise HTTPException(409,'Continue with ChatGPT and authorize plan usage first.')
-            if a.get('expires',0)<=time.time()+90:
+            if force or a.get('expires',0)<=time.time()+90:
                 try:
                     data=await self.exchange({'grant_type':'refresh_token','client_id':a['client_id'],
                         'refresh_token':a['refresh_token'],'resource':RESOURCE})
@@ -113,14 +150,27 @@ class Connection:
                     a.update(access_token=data['access_token'],refresh_token=data.get('refresh_token',a['refresh_token']),
                         expires=time.time()+float(data.get('expires_in',3600)),scopes=scopes)
                     cfg['accounts'][cfg['active']]=a;self.s.store.set_config('chatgpt',cfg)
-                except Exception:raise HTTPException(409,'ChatGPT session needs a fresh sign-in. No API billing fallback was used.')
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code in (400,401):
+                        message='ChatGPT session needs a fresh sign-in. Reconnect the selected account in Connections.'
+                        self.health(message);raise HTTPException(409,message) from None
+                    raise self.failure(error) from None
+                except Exception as error:raise self.failure(error) from None
             return a['access_token']
 
     async def models(self):
         token=await self.access()
-        async with httpx.AsyncClient(timeout=25,follow_redirects=False) as client:
-            r=await client.get(RESOURCE+'/models',headers={'Authorization':'Bearer '+token});r.raise_for_status()
-        return [{'slug':m['slug'],'display_name':m.get('display_name',m['slug'])} for m in r.json().get('models',[]) if m.get('visibility')=='list']
+        try:
+            async with httpx.AsyncClient(timeout=25,follow_redirects=False) as client:
+                r=await client.get(RESOURCE+'/models',headers={'Authorization':'Bearer '+token})
+                if r.status_code==401:
+                    token=await self.access(force=True)
+                    r=await client.get(RESOURCE+'/models',headers={'Authorization':'Bearer '+token})
+                r.raise_for_status()
+            models=[{'slug':m['slug'],'display_name':m.get('display_name',m['slug'])} for m in r.json().get('models',[]) if m.get('visibility')=='list']
+            self.health();return models
+        except HTTPException:raise
+        except Exception as error:raise self.failure(error) from None
 
     async def response(self, **fields):
         from openai import AsyncOpenAI
@@ -138,10 +188,15 @@ class Connection:
                         response=event.response
                         if not response.output and output_items:
                             response.output=[output_items[i] for i in sorted(output_items)]
-                        return response
+                        self.health();return response
                     if event.type in ('response.failed','response.incomplete','error'):
-                        raise HTTPException(502,'ChatGPT did not complete the request. Check plan limits or reconnect; no API billing fallback was used.')
+                        err=getattr(getattr(event,'response',None),'error',None) or getattr(event,'error',None)
+                        code=(err.get('code') if isinstance(err,dict) else getattr(err,'code',None)) or getattr(event,'code',None)
+                        from types import SimpleNamespace
+                        raise self.failure(SimpleNamespace(body={'error':{'code':code}}))
             raise HTTPException(502,'ChatGPT connection interrupted. Review activity before retrying.')
+        except HTTPException:raise
+        except Exception as error:raise self.failure(error) from None
         finally:await client.close()
 
 def register(s):
