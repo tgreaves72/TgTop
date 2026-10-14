@@ -10,6 +10,8 @@ Registration uses PKCE S256, random state and nonce, a stable host ID, and the i
 
 The model picker loads the account's live model catalog. ChatGPT requests use the public Responses API with store=false and stream=true, and collect completed output items before requiring response.completed. Failed, incomplete, or interrupted streams do not count as success. There is no automatic fallback to separately billed API usage.
 
+Provider gateway failures (HTTP 520–524) preserve the saved connection and show the actual gateway status. They do not trigger repeated sign-in or automatic replay of assistant actions. Retry later and review action history before resubmitting a request whose result is uncertain.
+
 ## Phone commands
 
 From your verified phone, text the line assigned by Photon:

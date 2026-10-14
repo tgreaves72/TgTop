@@ -47,6 +47,22 @@ def test_models_403_keeps_credentials_and_reports_attention(env,monkeypatch):
     assert response.status_code==403 and 'cannot use' in response.text and 'private-token' not in response.text
     assert s.chatgpt.public()['status']=='needs_attention'
     assert s.chatgpt.selected()['access_token']=='private-token'
+
+def test_gateway_failure_preserves_connection_and_hides_provider_detail(env,monkeypatch):
+    s,c,_=env
+    s.store.set_config('chatgpt',{'active':'one','accounts':{'one':{'access_token':'private-token','refresh_token':'private-refresh',
+        'scopes':['chatgpt.tokens.use.direct'],'expires':time.time()+3600}}})
+    class Client:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*a):pass
+        async def get(self,url,headers):
+            return httpx.Response(520,json={'type':'gateway','detail':'private-token'},request=httpx.Request('GET',url))
+    monkeypatch.setattr('app.chatgpt.httpx.AsyncClient',lambda **kwargs:Client())
+    response=c.get('/api/chatgpt/models')
+    assert response.status_code==503 and 'HTTP 520' in response.text
+    assert 'private-token' not in response.text and 'Reconnect' not in response.text
+    assert s.chatgpt.selected()['refresh_token']=='private-refresh'
+    assert 'HTTP 520' in s.chatgpt.public()['last_error']
 from types import SimpleNamespace
 from urllib.parse import urlsplit,parse_qs
 import jwt

@@ -47,6 +47,8 @@ def provider_failure(error):
         'subscription_sharing_user_unavailable':(503,'ChatGPT account information is temporarily unavailable. Your saved connection remains intact. Try again later.'),
     }
     if code in messages:return messages[code]
+    if status in (520,521,522,523,524):
+        return 503,f'OpenAI returned a gateway error (HTTP {status}). Your saved ChatGPT connection is unchanged. Try again later.'
     if status==401:return 409,'ChatGPT rejected the saved session. Reconnect the selected account in Connections.'
     if status==403:return 403,'ChatGPT denied access. Check plan eligibility, workspace policy, and the selected account.'
     if status==429:return 429,'ChatGPT is temporarily limiting requests. Check your plan usage and try again later.'
