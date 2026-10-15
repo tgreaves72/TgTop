@@ -50,6 +50,7 @@ class Session:
         self.sequence = 0
         self.pending = []
         self.persist_auth = True
+        self.read_timeout = 90
 
     async def __aenter__(self):
         binary = os.environ.get('TGTOP_CODEX_BIN') or shutil.which('tgtop-codex')
@@ -104,7 +105,7 @@ class Session:
         await self.proc.stdin.drain()
 
     async def read(self):
-        line = await asyncio.wait_for(self.proc.stdout.readline(), 90)
+        line = await asyncio.wait_for(self.proc.stdout.readline(), self.read_timeout)
         if not line:
             raise HTTPException(502, 'Codex connection ended. Review activity before retrying.')
         return json.loads(line)
@@ -160,6 +161,9 @@ class Managed:
                 if url != 'https://auth.openai.com/codex/device':
                     raise HTTPException(502, 'Codex returned an unexpected sign-in address.')
                 self.update(status='awaiting_signin', login_url=url, user_code=result['userCode'], last_error=None)
+                # Human sign-in can be silent for several minutes. The outer
+                # deadline bounds it; inference keeps the shorter idle timeout.
+                session.read_timeout = 600
                 ready.set_result(self.public())
                 async with asyncio.timeout(600):
                     while True:

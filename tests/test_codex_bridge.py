@@ -120,7 +120,9 @@ def test_signin_requires_the_original_tgtop_session_to_remain_valid(env,monkeypa
             if method=='account/login/start':return {'verificationUrl':'https://auth.openai.com/codex/device','userCode':'test-only-code'}
             if method=='account/read':return {'account':{'type':'chatgpt'}}
             if method=='model/list':return {'data':[{'model':'test-model','isDefault':True}]}
-        async def event(self):return {'method':'account/login/completed','params':{'success':True}}
+        async def event(self):
+            assert self.read_timeout == 600
+            return {'method':'account/login/completed','params':{'success':True}}
     monkeypatch.setattr('app.codex_bridge.Session',Session)
     async def login(identifier):
         await managed.start(identifier)
